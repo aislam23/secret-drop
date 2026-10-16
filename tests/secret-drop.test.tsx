@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { applyMaskedEdit, quoteEnv, redactSecrets, upsertEnv } from '../hooks/lib'
+import { applyMaskedEdit, peekOf, quoteEnv, redactSecrets, upsertEnv } from '../hooks/lib'
 
 describe('masked field', () => {
   test('typing, pasting and deleting through dots', () => {
@@ -73,6 +73,42 @@ describe('prompt guard', () => {
 
   test('leaves ordinary text alone', () => {
     expect(redactSecrets('set OPENAI_API_KEY in .env, see sk-learn docs').found).toEqual([])
+  })
+
+  test('says which string it caught: the words around it, a unique placeholder each', () => {
+    const a = 'Zq81kLm02XpR7tYv9wQe'
+    const b = 'Hh72pQx91LmZ0rTy5vBn'
+    const { found, text } = redactSecrets(`мой токен ${a}, а второй ключ ${b} для стейджа`)
+    expect(found.map(item => item.placeholder)).toEqual(['[key removed]', '[key 2 removed]'])
+    expect(text).toBe('мой токен [key removed], а второй ключ [key 2 removed] для стейджа')
+    expect(found.map(item => item.isKnown)).toEqual([false, false])
+    expect(found[0]?.around.before).toBe('мой токен ')
+    expect(found[0]?.around.after.startsWith(', а второй ключ [key 2 removed]')).toBe(true)
+    expect(found[1]?.around.before).toBe('мой токен [key removed], а второй ключ ')
+
+    const known = redactSecrets(`ключ sk_${'1c2b'.repeat(8)}`).found[0]
+    expect(known?.isKnown).toBe(true)
+  })
+
+  test('shows only the ends of a caught value', () => {
+    expect(peekOf('Zq81kLm02XpR7tYv9wQe')).toBe('Zq81…9wQe')
+    expect(peekOf('abcdefghij')).toBe('ab…ij')
+    expect(peekOf('short')).toBe('•••••')
+    expect(peekOf('-----BEGIN RSA PRIVATE KEY-----\nMIIE')).toBe('-----BEGIN RSA PRIVATE KEY-----')
+  })
+
+  test('lets through what the person said is not a key', () => {
+    const id = 'Zq81kLm02XpR7tYv9wQe'
+    expect(redactSecrets(`токен ${id}`, new Set([id])).found).toEqual([])
+  })
+
+  test('needs the words key, token or ключ as words, not inside other words', () => {
+    const id = 'K8Pro2024XyZWirelessEd'
+    for (const text of [`my keyboard model ${id}`, `the capital order ${id}`, `ключевой заказ ${id}`, `monkey ${id}`]) {
+      expect(redactSecrets(text).found).toEqual([])
+    }
+    expect(redactSecrets(`api_key ${id}`).found.length).toBe(1)
+    expect(redactSecrets(`ключа от сервиса ${id}`).found.length).toBe(1)
   })
 })
 
@@ -190,5 +226,96 @@ describe('origins', () => {
     const sent = await $.prompt.submit({ text, wait: false, origin: { kind: 'task-notification' } })
     expect('drop' in sent && sent.drop !== undefined).toBe(false)
     expect(delivered).toEqual([text])
+  })
+})
+
+describe('the band says what and why', () => {
+  test('a request without a reason or hints is sent back to the model, no band opens', async ($, on) => {
+    on('session.cwd', () => ({ value: '/proj' }))
+    on('ui.focus', () => ({}))
+    const bare = await $.tool.call({ tool: 'mcp__secret-drop__request_secret', secrets: [{ name: 'OPENAI_API_KEY' }] })
+    expect(JSON.stringify(bare)).toContain('reason')
+    const noHint = await $.tool.call({
+      tool: 'mcp__secret-drop__request_secret',
+      secrets: [{ name: 'OPENAI_API_KEY' }],
+      reason: 'the bot answers with GPT',
+    })
+    expect(JSON.stringify(noHint)).toContain('hint')
+    // nothing was left open: a full request goes through
+    const full = await $.tool.call({
+      tool: 'mcp__secret-drop__request_secret',
+      secrets: [{ name: 'OPENAI_API_KEY', hint: 'platform.openai.com → API keys' }],
+      reason: 'the bot answers with GPT',
+    })
+    expect(JSON.stringify(full)).toContain('End your turn')
+  })
+
+  test('the reason gets its own line', async ($, on) => {
+    on('session.cwd', () => ({ value: '/proj' }))
+    on('ui.focus', () => ({}))
+    await $.tool.call({
+      tool: 'mcp__secret-drop__request_secret',
+      secrets: [{ name: 'ELEVENLABS_API_KEY', hint: 'elevenlabs.io → Profile → API Keys' }],
+      reason: 'the bot sends voice replies',
+    })
+    const desk = await $.ui.mount({ plugin: 'secret-drop', surface: 'desktop', component: 'AbovePrompt', props: BAND_PROPS })
+    const head = await desk.find({ type: 'Svg' })
+    const alt = String((head?.props as { alt?: string } | undefined)?.alt)
+    expect(alt).toContain('elevenlabs.io → Profile → API Keys')
+    expect(alt).toContain('Why: the bot sends voice replies')
+    await desk.unmount()
+  })
+})
+
+describe('not a key', () => {
+  test('the band shows what it caught; "Not a key" puts it back and lets the message through', async ($, on) => {
+    const id = 'Zq81kLm02XpR7tYv9wQe'
+    const original = `сравни токен-заказ ${id} с прошлым`
+    const draft = 'сравни токен-заказ [key removed] с прошлым'
+    let box = draft
+    const writes: string[] = []
+    on('session.cwd', () => ({ value: '/proj' }))
+    on('ui.focus', () => ({}))
+    on('fs.write', (_$, e) => {
+      writes.push(e.path)
+      return { value: undefined }
+    })
+    on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
+    on('prompt.fill', (_$, e) => {
+      box = e.text
+      return { isFilled: true }
+    })
+    const delivered: string[] = []
+    on('prompt.submit', (_$, e) => {
+      delivered.push(e.text)
+      return { text: e.text }
+    })
+
+    const sent = await $.prompt.submit({ text: original, wait: false, origin: { kind: 'composer' } })
+    expect('drop' in sent && typeof sent.drop === 'string').toBe(true)
+
+    const desk = await $.ui.mount({ plugin: 'secret-drop', surface: 'desktop', component: 'AbovePrompt', props: BAND_PROPS })
+    const alt = String(((await desk.find({ type: 'Svg' }))?.props as { alt?: string } | undefined)?.alt)
+    expect(alt).toContain('Caught: «сравни токен-заказ Zq81…9wQe с прошлым»')
+    expect(alt).toContain('20 chars')
+    expect(alt).toContain('unknown format')
+    await desk.unmount()
+
+    const ui = await $.ui.mount({ plugin: 'secret-drop', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+    await ui.press({ key: 'release' })
+    await ui.unmount()
+    expect(box).toBe(original)
+    expect(writes).toEqual([])
+    // the band closed: a new request is not told that another one is open
+    const next = await $.tool.call({
+      tool: 'mcp__secret-drop__request_secret',
+      secrets: [{ name: 'X_KEY', hint: 'x' }],
+      reason: 'x',
+    })
+    expect(JSON.stringify(next)).toContain('End your turn')
+
+    const again = await $.prompt.submit({ text: original, wait: false, origin: { kind: 'composer' } })
+    expect('drop' in again && again.drop !== undefined).toBe(false)
+    expect(delivered).toEqual([original])
   })
 })

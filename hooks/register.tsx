@@ -8,13 +8,15 @@ import {
   STRINGS,
   applyMaskedEdit,
   githubNameProblem,
+  peekOf,
   redactSecrets,
+  replaceOnce,
   scrub,
   upsertEnv,
 } from './lib'
 import type { Lang, Strings } from './lib'
-import { CUE_H, FOOT_H, HEADER_H, cueSvg, cueWidth, footSvg, headerSvg, reportSvg, toneOf } from './look'
-import type { Destination } from './look'
+import { CUE_H, FOOT_H, cueSvg, cueWidth, detailText, footSvg, headerHeight, headerSvg, reportSvg, toneOf } from './look'
+import type { Destination, Detail } from './look'
 
 // The pane id of 0.1.0, closed on load so an old window does not linger.
 const OLD_PANE = 'secret-drop'
@@ -45,6 +47,8 @@ const TOOL_DESCRIPTION = `Ask the user for secrets (API keys, tokens, passwords)
 
 Use it whenever a task needs a secret from the user: never ask them to paste a secret into the chat, and never spin up a local server or form to collect one.
 
+The window shows only what you pass, and a user who cannot tell what a key is or why it is needed skips it. So always pass \`reason\` (what the key is for in this task) and, for every secret, a \`hint\` naming the service and where exactly to get the key (the page or the menu path). Both in the user's language.
+
 The call returns at once and the window stays open for the user. End your turn right after calling it. When the user is done you receive a message starting with "[secret-drop]" listing what was saved where (names and lengths only). Afterwards refer to the values through the environment (process.env.NAME, $NAME, \${{ secrets.NAME }}); never print, cat or echo them.`
 
 const TOOL_SCHEMA = {
@@ -61,13 +65,18 @@ const TOOL_SCHEMA = {
           name: { type: 'string', description: 'Variable name, e.g. OPENAI_API_KEY.' },
           hint: {
             type: 'string',
-            description: "Shown under the name: where to get it or what it looks like, in the user's language.",
+            description:
+              "Shown next to the name, in the user's language: which service the key belongs to and where exactly to get it, e.g. \"OpenAI: platform.openai.com → API keys → Create new secret key\".",
           },
         },
-        required: ['name'],
+        required: ['name', 'hint'],
       },
     },
-    reason: { type: 'string', description: "One short sentence, in the user's language: why it is needed." },
+    reason: {
+      type: 'string',
+      description:
+        "One sentence, in the user's language: what the key is needed for in this task, e.g. \"the bot sends voice replies through ElevenLabs\".",
+    },
     save_to: {
       type: 'array',
       items: { type: 'string', enum: ['env', 'github'] },
@@ -80,14 +89,18 @@ const TOOL_SCHEMA = {
     github_repo: { type: 'string', description: 'owner/repo for GitHub secrets. Default: the repository of the working directory.' },
     github_environment: { type: 'string', description: 'A GitHub deployment environment, for environment secrets.' },
   },
-  required: ['secrets'],
+  required: ['secrets', 'reason'],
 }
+
+const MISSING_WHY = `The window would not tell the user what to paste or why, so it was not opened. Call request_secret again with \`reason\` (one sentence: what the key is for in this task) and a \`hint\` for every secret (the service and where exactly to get the key), in the user's language.`
 
 // The values live here and only here, for as long as the window is open.
 let buffer = ''
 const values = new Map<string, string>()
 // Keys the prompt guard caught, waiting in the band to be saved, by secret index.
 const prefill = new Map<number, string>()
+// Strings the person said are not keys: the guard lets them through for the rest of the session.
+const notSecrets = new Set<string>()
 let S: Strings = STRINGS.en
 
 const namesOf = (req: SecretRequest) =>
@@ -143,6 +156,7 @@ async function start($: Engine, args: StartArgs): Promise<SecretRequest | string
       name,
       ...(ask.hint ? { hint: String(ask.hint) } : {}),
       ...(ask.placeholder ? { placeholder: ask.placeholder } : {}),
+      ...(ask.around ? { around: ask.around } : {}),
     })
   }
   if (secrets.length === 0) return 'Name at least one secret.'
@@ -276,9 +290,30 @@ async function restoreDraft($: Engine, req: SecretRequest) {
   let text = req.draft
   const where = req.envLabel ?? req.envFile ?? '.env'
   for (const ask of req.secrets) {
-    if (ask.placeholder && req.captured.includes(ask.name)) text = text.replace(ask.placeholder, S.savedAs(ask.name, where))
+    if (ask.placeholder && req.captured.includes(ask.name)) text = replaceOnce(text, ask.placeholder, S.savedAs(ask.name, where))
   }
   if (text !== req.draft) await $.prompt.fill({ text })
+}
+
+/**
+ * "Not a key": the caught string goes back into the message where it stood, the guard
+ * lets it through from now on, and the band moves to the next one.
+ */
+async function release($: Engine) {
+  const req = await read($, request)
+  if (!req || req.phase !== 'input' || req.from !== 'guard') return
+  const ask = req.secrets[req.index]
+  const value = prefill.get(req.index)
+  if (!ask || value === undefined) return advance($, 'skip')
+  notSecrets.add(value)
+  if (ask.placeholder && req.draft !== undefined) {
+    const draft = replaceOnce(req.draft, ask.placeholder, value)
+    // the box may have been edited meanwhile: put the string back wherever its placeholder still is
+    const box = await $.prompt.read()
+    if (box.text.includes(ask.placeholder)) await $.prompt.fill({ text: replaceOnce(box.text, ask.placeholder, value) })
+    await update($, request, now => (now && now.id === req.id ? { ...now, draft } : now))
+  }
+  await advance($, 'release')
 }
 
 async function renameAsk($: Engine, name: string) {
@@ -294,7 +329,8 @@ async function finish($: Engine, isCancelled: boolean) {
   if (!req || req.phase !== 'input') return
   $.ui.status(undefined)
   const lengths = new Map([...values].map(([name, value]) => [name, value.length]))
-  if (isCancelled) {
+  // every caught string turned out not to be a key: nothing to save, nothing to tell
+  if (isCancelled || (req.from === 'guard' && values.size === 0)) {
     buffer = ''
     values.clear()
     prefill.clear()
@@ -319,11 +355,12 @@ async function finish($: Engine, isCancelled: boolean) {
   })
 }
 
-async function advance($: Engine, isTaken: boolean) {
+async function advance($: Engine, how: 'take' | 'skip' | 'release') {
   const req = await read($, request)
   if (!req || req.phase !== 'input') return
   const ask = req.secrets[req.index]
   if (!ask) return
+  const isTaken = how === 'take'
   if (isTaken && buffer === '') return
   if (isTaken && !ENV_NAME.test(ask.name)) {
     $.ui.toast(S.badName)
@@ -334,7 +371,8 @@ async function advance($: Engine, isTaken: boolean) {
   const next: SecretRequest = {
     ...req,
     captured: isTaken ? [...req.captured, ask.name] : req.captured,
-    skipped: isTaken ? req.skipped : [...req.skipped, ask.name],
+    skipped: how === 'skip' ? [...req.skipped, ask.name] : req.skipped,
+    released: how === 'release' ? [...(req.released ?? []), ask.name] : req.released,
   }
   await update($, isRevealed, () => false)
   if (req.index + 1 < req.secrets.length) {
@@ -402,7 +440,9 @@ export const register: Register = (on, options) => {
       github_repo?: string
       github_environment?: string
     }
-    if (!Array.isArray(input.secrets) || input.secrets.length === 0) return { deny: 'Pass `secrets`: [{ name }].' }
+    if (!Array.isArray(input.secrets) || input.secrets.length === 0) return { deny: 'Pass `secrets`: [{ name, hint }].' }
+    const isBlank = (s: unknown) => String(s ?? '').trim() === ''
+    if (isBlank(input.reason) || input.secrets.some(ask => isBlank(ask?.hint))) return { deny: MISSING_WHY }
     const started = await start($, {
       secrets: input.secrets,
       reason: input.reason,
@@ -476,7 +516,7 @@ export const register: Register = (on, options) => {
     on('prompt.submit', async ($, e, next) => {
       // only what a person typed: agents' notifications, routines and other sessions pass untouched
       if (!HUMAN_ORIGINS.has(e.origin.kind)) return next(e)
-      const { found, text } = redactSecrets(e.text)
+      const { found, text } = redactSecrets(e.text, notSecrets)
       if (found.length === 0) return next(e)
       $.clock.after(150, () => void $.prompt.fill({ text }))
       // the same guessed name twice gets a number, so neither key is dropped
@@ -484,11 +524,16 @@ export const register: Register = (on, options) => {
       const secrets = found.map(item => {
         const n = (used.get(item.name) ?? 0) + 1
         used.set(item.name, n)
-        return { name: n > 1 ? `${item.name}_${n}` : item.name, hint: S.guardHint(item.kind), placeholder: item.placeholder }
+        return {
+          name: n > 1 ? `${item.name}_${n}` : item.name,
+          hint: S.guardHint(item.kind, item.isKnown),
+          placeholder: item.placeholder,
+          around: item.around,
+        }
       })
       await start($, { secrets, from: 'guard', prefill: found.map(item => item.value), draft: text })
 
-      return { drop: S.leaked([...new Set(found.map(item => item.kind))].join(', ')) }
+      return { drop: S.leaked(found.length) }
     })
   }
 
@@ -506,6 +551,22 @@ export const register: Register = (on, options) => {
     const W = Math.max(320, Math.min(1400, (e.props.bodyColumns || 100) * 8))
     const shownLine = (line: string) =>
       req.envFile && req.envLabel ? line.split(req.envFile).join(req.envLabel) : line
+    const isGuard = req.from === 'guard'
+    const title = isGuard ? S.guardTitle : req.from === 'person' ? S.personAsks : S.asks
+    // what the band says under the name: why Claude needs it, or which string of the message was caught
+    const detailOf = (index: number): Detail | undefined => {
+      if (!isGuard) return req.reason ? { label: S.whyLabel, before: req.reason } : undefined
+      const around = req.secrets[index]?.around
+      const caught = prefill.get(index)
+      if (!around && caught === undefined) return undefined
+      return {
+        label: S.caughtLabel,
+        before: around?.before ?? '',
+        mark: caught !== undefined ? peekOf(caught) : '…',
+        after: around?.after ?? '',
+        ...(caught !== undefined ? { tail: S.chars(caught.length) } : {}),
+      }
+    }
 
     if (Svg && req.phase !== 'input') {
       const lines = req.phase === 'saving' ? [] : req.report.map(line => ({ text: shownLine(line), tone: toneOf(line) }))
@@ -530,13 +591,14 @@ export const register: Register = (on, options) => {
       const destinations: Destination[] = []
       if (req.envFile) destinations.push({ kind: 'env', label: req.envLabel ?? req.envFile })
       if (req.github) destinations.push({ kind: 'github', label: S.ghTo(req.github.repo, req.github.environment) })
-      const isGuard = req.from === 'guard'
       const cueW = isGuard ? Math.max(cueWidth(S.nameCue), cueWidth(S.keyCue)) : cueWidth(S.cue)
+      const detail = detailOf(req.index)
       const look = {
-        title: isGuard ? S.guardTitle : S.asks,
-        reason: req.reason,
+        title,
+        ...(isGuard ? { reason: S.guardReason } : {}),
         name: ask.name,
         hint: ask.hint,
+        ...(detail ? { detail } : {}),
         step: { index: req.index, count },
         destinations,
       }
@@ -545,9 +607,9 @@ export const register: Register = (on, options) => {
           <Svg
             key={`head-${req.id}-${req.index}-${W}`}
             source={headerSvg(look, W)}
-            alt={`${look.title}: ${ask.name}${ask.hint ? `, ${ask.hint}` : ''} → ${destinations.map(d => d.label).join(', ')}`}
+            alt={`${look.title}: ${ask.name}${ask.hint ? `, ${ask.hint}` : ''}${detail ? `. ${detailText(detail)}` : ''} → ${destinations.map(d => d.label).join(', ')}`}
             width={W}
-            height={HEADER_H}
+            height={headerHeight(look)}
           />
           {isGuard && (
             <Box flexDirection="row" alignItems="center" columnGap={1}>
@@ -586,7 +648,7 @@ export const register: Register = (on, options) => {
                 }}
                 onSubmit={value => {
                   buffer = revealed ? value : applyMaskedEdit(buffer, value)
-                  void advance($, true)
+                  void advance($, 'take')
                 }}
               />
             </Box>
@@ -598,7 +660,11 @@ export const register: Register = (on, options) => {
               label={revealed ? S.hide : S.show}
               onPress={() => void update($, isRevealed, shown => !shown)}
             />
-            {count > 1 && <Button key="skip" plain dimColor label={S.skip} onPress={() => void advance($, false)} />}
+            {isGuard ? (
+              <Button key="release" plain label={S.notKey} onPress={() => void release($)} />
+            ) : (
+              count > 1 && <Button key="skip" plain dimColor label={S.skip} onPress={() => void advance($, 'skip')} />
+            )}
             <Button
               key="cancel"
               plain
@@ -645,14 +711,14 @@ export const register: Register = (on, options) => {
       req.envFile ? (req.envLabel ?? req.envFile) : undefined,
       req.github ? S.ghTo(req.github.repo, req.github.environment) : undefined,
     ].filter((line): line is string => line !== undefined)
-    const about = [req.reason, ask.hint].filter(Boolean).join(' · ')
-    const isGuard = req.from === 'guard'
+    const detail = detailOf(req.index)
+    const about = [isGuard ? S.guardReason : undefined, ask.hint].filter(Boolean).join(' · ')
 
     return (
       <Box flexDirection="column" rowGap={1}>
         <Box flexDirection="row" justifyContent="space-between" columnGap={2}>
           <Text wrap="truncate-end">
-            <Text bold>🔐 {isGuard ? S.guardTitle : S.asks} </Text>
+            <Text bold>🔐 {title} </Text>
             <Text bold color="cyan">
               {ask.name}
             </Text>
@@ -667,6 +733,23 @@ export const register: Register = (on, options) => {
             {about}
           </Text>
         )}
+        {detail &&
+          (detail.mark === undefined ? (
+            <Text wrap="wrap">
+              <Text dimColor>{detail.label} </Text>
+              {detail.before}
+            </Text>
+          ) : (
+            <Text wrap="truncate-start">
+              <Text dimColor>{detail.label} «</Text>
+              {detail.before}
+              <Text bold color="cyan">
+                {detail.mark}
+              </Text>
+              {detail.after}
+              <Text dimColor>»{detail.tail ? ` · ${detail.tail}` : ''}</Text>
+            </Text>
+          ))}
         {isGuard && (
           <Input
             key={nameKey(req)}
@@ -694,7 +777,7 @@ export const register: Register = (on, options) => {
               }}
               onSubmit={value => {
                 buffer = revealed ? value : applyMaskedEdit(buffer, value)
-                void advance($, true)
+                void advance($, 'take')
               }}
             />
           </Box>
@@ -703,7 +786,11 @@ export const register: Register = (on, options) => {
             label={revealed ? S.hide : S.show}
             onPress={() => void update($, isRevealed, shown => !shown)}
           />
-          {count > 1 && <Button key="skip" label={S.skip} onPress={() => void advance($, false)} />}
+          {isGuard ? (
+            <Button key="release" label={S.notKey} onPress={() => void release($)} />
+          ) : (
+            count > 1 && <Button key="skip" label={S.skip} onPress={() => void advance($, 'skip')} />
+          )}
           <Button key="cancel" label={isGuard ? S.dontSave : S.cancel} role="dismiss" onPress={() => void finish($, true)} />
         </Box>
         <Text dimColor>🔒 {S.footer}</Text>

@@ -81,10 +81,55 @@ const PATTERNS: ReadonlyArray<{ kind: string; name: string; re: RegExp }> = [
   { kind: 'private key', name: 'PRIVATE_KEY', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g },
 ]
 
-export type Found = { kind: string; name: string; value: string; placeholder: string }
+/** The words of the blocked message around a caught key, so the band can show which string it caught. */
+export type Around = { before: string; after: string }
 
-/** Words that say "a secret is next to this", in English and Russian. */
-const SECRET_CONTEXT = /(api|key|token|secret|password|passwd|ключ|ключик|токен|секрет|пароль)/i
+export type Found = {
+  kind: string
+  name: string
+  value: string
+  placeholder: string
+  /** False when the format is unknown and only the words around it made it look like a key. */
+  isKnown: boolean
+  around: Around
+}
+
+/**
+ * Words that say "a secret is next to this", in English and Russian, as whole words:
+ * "keyboard", "monkey", "capital" or "ключевой" do not count.
+ */
+const SECRET_CONTEXT =
+  /(?<![\p{L}\p{N}])(?:api|apikey|keys?|tokens?|secrets?|passwords?|passwd|ключ(?!ев)\p{L}*|токен\p{L}*|секрет\p{L}*|парол\p{L}*)(?!\p{L})/iu
+
+const AROUND_BEFORE = 60
+const AROUND_AFTER = 40
+
+/** The message text on both sides of a placeholder, on one line; a leading or trailing … marks a cut. */
+function aroundOf(text: string, placeholder: string): Around {
+  const at = text.indexOf(placeholder)
+  if (at < 0) return { before: '', after: '' }
+  const flat = (s: string) => s.replace(/\s+/g, ' ')
+  const from = Math.max(0, at - AROUND_BEFORE)
+  const end = at + placeholder.length
+  const to = Math.min(text.length, end + AROUND_AFTER)
+  const before = flat(text.slice(from, at)).trimStart()
+  const after = flat(text.slice(end, to)).trimEnd()
+
+  return {
+    before: from > 0 && before !== '' ? `…${before}` : before,
+    after: to < text.length && after !== '' ? `${after}…` : after,
+  }
+}
+
+/** A glimpse of a caught value, enough to recognise it: its ends, never the middle. */
+export function peekOf(value: string): string {
+  const pem = /^-----BEGIN [A-Z ]*PRIVATE KEY-----/.exec(value)
+  if (pem) return pem[0]
+  if (value.length >= 16) return `${value.slice(0, 4)}…${value.slice(-4)}`
+  if (value.length >= 10) return `${value.slice(0, 2)}…${value.slice(-2)}`
+
+  return DOT.repeat(value.length)
+}
 
 /**
  * A token-like string with no known shape: 20+ characters of letters, digits, `_` or `-`,
@@ -98,27 +143,46 @@ const isLooseSecret = (s: string) =>
   !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s) &&
   !/^[A-Z0-9_]+$/.test(s) // an UPPER_CASE_NAME is a variable name, not its value
 
-/** Finds token-shaped strings and returns the text with each one cut out. */
-export function redactSecrets(text: string): { found: Found[]; text: string } {
-  const found: Found[] = []
+/**
+ * Finds token-shaped strings and returns the text with each one cut out.
+ * `allowed` holds values the person said are not keys: they stay in the text.
+ * Each placeholder is unique, so a key can be put back or named in its own place.
+ */
+export function redactSecrets(
+  text: string,
+  allowed: ReadonlySet<string> = new Set(),
+): { found: Found[]; text: string } {
+  const found: Array<Omit<Found, 'around'>> = []
+  const used = new Map<string, number>()
+  const placeholderOf = (label: string) => {
+    const n = (used.get(label) ?? 0) + 1
+    used.set(label, n)
+    return n === 1 ? `[${label} removed]` : `[${label} ${n} removed]`
+  }
   let out = text
   for (const { kind, name, re } of PATTERNS) {
     out = out.replace(re, value => {
-      const placeholder = `[${kind} key removed]`
-      found.push({ kind, name, value, placeholder })
+      if (allowed.has(value)) return value
+      const placeholder = placeholderOf(`${kind} key`)
+      found.push({ kind, name, value, placeholder, isKnown: true })
       return placeholder
     })
   }
-  if (SECRET_CONTEXT.test(out)) {
+  // the person's own words, not the placeholders (they say "key") or the keys (sk-ant-api03-…)
+  if (SECRET_CONTEXT.test(out.replace(/\[[^\]\n]* removed\]/g, ' '))) {
     out = out.replace(LOOSE_TOKEN, match => {
-      if (!isLooseSecret(match)) return match
-      found.push({ kind: 'API', name: 'API_KEY', value: match, placeholder: '[key removed]' })
-      return '[key removed]'
+      if (!isLooseSecret(match) || allowed.has(match)) return match
+      const placeholder = placeholderOf('key')
+      found.push({ kind: 'API', name: 'API_KEY', value: match, placeholder, isKnown: false })
+      return placeholder
     })
   }
 
-  return { found, text: out }
+  return { found: found.map(item => ({ ...item, around: aroundOf(out, item.placeholder) })), text: out }
 }
+
+/** Puts `to` where `from` stands in a text, once; `$` in `to` is taken literally. */
+export const replaceOnce = (text: string, from: string, to: string) => text.replace(from, () => to)
 
 /** Replaces any occurrence of the values in a text (a tool's stderr, say). */
 export function scrub(text: string, values: Iterable<string>): string {
@@ -166,10 +230,16 @@ export const STRINGS = {
     gitignored: (rel: string) => `✓ added ${rel} to .gitignore`,
     tracked: (rel: string) => `⚠ ${rel} is already tracked by git: run git rm --cached ${rel}`,
     nothing: 'Nothing entered.',
-    leaked: (kinds: string) =>
-      `secret-drop: the message held a ${kinds} key, so it was not sent. Save the key in the band above the prompt; the message is back in the box without it.`,
-    guardTitle: 'Caught a key in your message',
-    guardHint: (kind: string) => `${kind} key, already filled in: check the name and press Enter`,
+    leaked: (n: number) =>
+      `secret-drop: the message held ${n === 1 ? 'something that looks like a key' : `${n} strings that look like keys`}, so it was not sent. The band above the prompt shows what was caught: save it, or press "Not a key" to put it back.`,
+    personAsks: 'Save a key',
+    guardTitle: 'Your message holds something that looks like a key',
+    guardReason: 'the message was not sent, so the key stays out of the chat',
+    guardHint: (kind: string, isKnown: boolean) =>
+      isKnown ? `looks like a ${kind} key` : 'unknown format: check that it is really a key',
+    whyLabel: 'Why:',
+    caughtLabel: 'Caught:',
+    notKey: 'Not a key',
     nameCue: 'Name',
     keyCue: 'Key',
     dontSave: "Don't save",
@@ -211,10 +281,16 @@ export const STRINGS = {
     gitignored: (rel: string) => `✓ добавил ${rel} в .gitignore`,
     tracked: (rel: string) => `⚠ ${rel} уже в git: выполни git rm --cached ${rel}`,
     nothing: 'Ничего не введено.',
-    leaked: (kinds: string) =>
-      `secret-drop: в сообщении был ключ (${kinds}), я его не отправил. Сохрани ключ в плашке над полем ввода, а сообщение вернулось в поле уже без него.`,
-    guardTitle: 'Поймал ключ в сообщении',
-    guardHint: (kind: string) => `ключ ${kind} уже подставлен: проверь имя и нажми Enter`,
+    leaked: (n: number) =>
+      `secret-drop: в сообщении ${n === 1 ? 'было что-то похожее на ключ' : `нашлись строки, похожие на ключи (${n})`}, поэтому я его не отправил. В плашке над полем ввода видно, что именно поймано: сохрани или нажми «Это не ключ», и строка вернётся в сообщение.`,
+    personAsks: 'Сохранить ключ',
+    guardTitle: 'В сообщении что-то похожее на ключ',
+    guardReason: 'сообщение не отправил, чтобы ключ не ушёл в чат',
+    guardHint: (kind: string, isKnown: boolean) =>
+      isKnown ? `похоже на ключ ${kind}` : 'формат не узнал: проверь, точно ли это ключ',
+    whyLabel: 'Зачем:',
+    caughtLabel: 'Поймал:',
+    notKey: 'Это не ключ',
     nameCue: 'Имя',
     keyCue: 'Ключ',
     dontSave: 'Не сохранять',

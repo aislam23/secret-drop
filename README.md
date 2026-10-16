@@ -20,13 +20,14 @@ Answer `y` to add the marketplace, then pick the user scope. Once installed at t
 
 ## How it works
 
-**Claude asks.** The mod gives Claude a `request_secret` tool and tells it to use the tool instead of asking for keys in the chat:
+**Claude asks.** The mod gives Claude a `request_secret` tool and tells it to use the tool instead of asking for keys in the chat. Claude has to say what the key is for and where to get it: a call without a `reason` and a `hint` for every key is sent back to it, so the band never asks for a bare name.
 
 > Claude: I need the OpenAI key for the bot. I've opened a secure field above your prompt.
 
 ```
-(🔑)  Claude asks for a key · the bot calls the OpenAI API      ●○ 1/2  [📄 .env in the project folder]
+(🔑)  Claude asks for a key                                      ●○ 1/2  [📄 .env in the project folder]
       OPENAI_API_KEY  platform.openai.com → API keys
+      Why: the bot calls the OpenAI API
 
 Paste the key →  [ •••••••••••••••••••• ] [next]                          Show   Skip   Cancel
 🛡 The value never enters the chat. Claude only learns the name and length.
@@ -55,7 +56,15 @@ Entered: OPENAI_API_KEY (51 chars), TELEGRAM_BOT_TOKEN (46 chars).
 
 **Safety net.** If you paste a key straight into the chat anyway (OpenAI, Anthropic, ElevenLabs, GitHub, GitLab, AWS, Google, Stripe, Slack, Telegram bot, Supabase, Hugging Face, Groq, xAI, Perplexity, Replicate, npm, Yandex, private keys), the message is **not sent**. A long token next to words like *key*, *token*, *password* or *ключ* is caught too, even in an unknown format.
 
-Instead, the band opens right away with the caught key already filled in (as dots) and a name guessed from its format, such as `ELEVENLABS_API_KEY`. Fix the name if you like and press Enter. The key is saved, and your message comes back into the prompt box with the key's name where the key was: `use ELEVENLABS_API_KEY (saved to .env in the project folder)`. Press **Don't save** to drop the key instead.
+Instead, the band opens right away with the caught key already filled in (as dots) and a name guessed from its format, such as `ELEVENLABS_API_KEY`. It shows which string of the message was caught, so you can tell the keys apart: the words around it, the key's first and last four characters and its length.
+
+```
+(🔑)  Your message holds something that looks like a key · the message was not sent…   ●○○ 1/3
+      API_KEY  unknown format: check that it is really a key
+      Caught: «…and the token for the bot: Zq81…9wQe, then check the logs…» · 20 chars
+```
+
+Fix the name if you like and press Enter. The key is saved, and your message comes back into the prompt box with the key's name where the key was: `use ELEVENLABS_API_KEY (saved to .env in the project folder)`. If the caught string is not a key at all (an order id, say), press **Not a key**: it goes back into the message where it was and is let through for the rest of the session. Press **Don't save** to drop the key instead.
 
 ## What it does with the value
 
@@ -97,7 +106,8 @@ MIT © Artem Islamov
 Мод для Claude Code: передаёт Claude ключи и пароли **без вставки в чат**. Когда Claude нужен ключ, прямо над полем сообщения появляется плашка со скрытым полем. Вставляешь ключ, жмёшь Enter, и мод сам кладёт его в `.env` или в GitHub Secrets. Claude узнаёт только «OPENAI_API_KEY сохранён (51 симв.)».
 
 - Claude сам вызывает инструмент `request_secret`, а ты можешь открыть окно сам: `/secret ИМЯ [--github]`.
-- Если всё-таки вставишь ключ в сообщение, оно не уйдёт. Сразу откроется плашка с уже подставленным ключом и угаданным именем (например `ELEVENLABS_API_KEY`): жмёшь Enter, и ключ сохранён, а в сообщении вместо ключа стоит его имя.
+- Claude обязан объяснить, что это за ключ, зачем он нужен и где его взять: вызов без `reason` и `hint` возвращается ему обратно.
+- Если всё-таки вставишь ключ в сообщение, оно не уйдёт. Сразу откроется плашка с уже подставленным ключом и угаданным именем (например `ELEVENLABS_API_KEY`) и покажет, какая именно строка поймана: слова вокруг, первые и последние 4 символа, длина. Жмёшь Enter, и ключ сохранён, а в сообщении вместо ключа стоит его имя. Если это не ключ (номер заказа, id), жми «Это не ключ»: строка вернётся в сообщение.
 - `.env` добавляется в `.gitignore`. В GitHub значение уходит через stdin `gh secret set`.
 
 Как мод делался вместе с Claude, со скриншотами и выводами про работу с агентом: [Как я научил Claude безопасно брать пароли и ключи с помощью мода](https://islamov-tema.ru/blog/claude-secret-drop).

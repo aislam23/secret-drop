@@ -3,6 +3,8 @@ export type SecretAsk = {
   hint?: string
   /** What stands for this key in a blocked prompt, to swap for its name once saved. */
   placeholder?: string
+  /** The blocked prompt's words on both sides of the key, so the band shows which string was caught. */
+  around?: { before: string; after: string }
 }
 
 export type SecretRequest = {
@@ -22,6 +24,8 @@ export type SecretRequest = {
   index: number
   captured: string[]
   skipped: string[]
+  /** Caught strings the person said are not keys: put back into the message, never saved. */
+  released?: string[]
   phase: 'input' | 'saving' | 'finished'
   report: string[]
 }
