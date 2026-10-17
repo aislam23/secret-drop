@@ -1,6 +1,6 @@
 {
   "name": "secret-drop",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Secure input window for API keys and passwords: Claude asks, you type into a masked field, the mod writes .env / GitHub Secrets itself. The value never enters the chat.",
   "author": {
     "name": "Artem Islamov"

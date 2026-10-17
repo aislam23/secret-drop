@@ -83,14 +83,13 @@ const PATTERNS: ReadonlyArray<{ kind: string; name: string; re: RegExp }> = [
 
 export type Found = { kind: string; name: string; value: string; placeholder: string }
 
-/** Words that say "a secret is next to this", in English and Russian. */
-const SECRET_CONTEXT = /(api|key|token|secret|password|passwd|ключ|ключик|токен|секрет|пароль)/i
-
 /**
- * A token-like string with no known shape: 20+ characters of letters, digits, `_` or `-`,
- * holding both letters and at least three digits. Git hashes (40 hex) and UUIDs are left alone.
+ * A token with no known shape counts only when it is handed over as a value: a word that names a
+ * secret, then within 30 characters of the same line a separator, then the token
+ * (`ключ: …`, `токен → …`, `api key = …`). A key-like id merely mentioned near such a word is left alone.
  */
-const LOOSE_TOKEN = /(?<![\w/.@-])[A-Za-z0-9][A-Za-z0-9_-]{19,}(?![\w/.@-])/g
+const LOOSE_ASSIGNED =
+  /(?:api[\s_-]?key|key|token|secret|password|passwd|ключ(?:ик)?|токен|секрет|пароль)[^\n]{0,30}?(?:[:=]|->|→|—|–)\s*["'`«]?([A-Za-z0-9][A-Za-z0-9_-]{19,})(?![\w/.@-])/gi
 const isLooseSecret = (s: string) =>
   /[A-Za-z]/.test(s) &&
   (s.match(/[0-9]/g)?.length ?? 0) >= 3 &&
@@ -109,13 +108,11 @@ export function redactSecrets(text: string): { found: Found[]; text: string } {
       return placeholder
     })
   }
-  if (SECRET_CONTEXT.test(out)) {
-    out = out.replace(LOOSE_TOKEN, match => {
-      if (!isLooseSecret(match)) return match
-      found.push({ kind: 'API', name: 'API_KEY', value: match, placeholder: '[key removed]' })
-      return '[key removed]'
-    })
-  }
+  out = out.replace(LOOSE_ASSIGNED, (match: string, token: string) => {
+    if (!isLooseSecret(token)) return match
+    found.push({ kind: 'API', name: 'API_KEY', value: token, placeholder: '[key removed]' })
+    return match.slice(0, match.lastIndexOf(token)) + '[key removed]'
+  })
 
   return { found, text: out }
 }

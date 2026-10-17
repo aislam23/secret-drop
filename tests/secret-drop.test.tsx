@@ -67,6 +67,8 @@ describe('prompt guard', () => {
       'ключ лежит в https://example.com/docs/api/keys2024/v3/reference',
       'put the key into OPENAI_API_KEY_2024_PROD',
       'the token expires in 3600 seconds',
+      'Сделай урок голосом через ElevenLabs (голос uuAEb8aX4QXTwh8CAexT, ключ ELEVENLABS_API_KEY в ~/Movies/.env)',
+      'API: модель eleven_v4, voice_id uuAEb8aX4QXTwh8CAexT, ключ лежит в .env',
     ]
     for (const text of texts) expect(redactSecrets(text).found).toEqual([])
   })
@@ -190,5 +192,21 @@ describe('origins', () => {
     const sent = await $.prompt.submit({ text, wait: false, origin: { kind: 'task-notification' } })
     expect('drop' in sent && sent.drop !== undefined).toBe(false)
     expect(delivered).toEqual([text])
+  })
+})
+
+describe("another session's brief", () => {
+  test('a long task handed to a new session is not stopped for a voice id near the word key', async ($, on) => {
+    const delivered: string[] = []
+    on('prompt.submit', (_$, e) => {
+      delivered.push(e.text)
+      return { text: e.text }
+    })
+    const brief =
+      'Сделай урок для YouTube. Видео делать скиллом onetake, голосом Артёма через ElevenLabs: ' +
+      'голос uuAEb8aX4QXTwh8CAexT, модель eleven_v4, ключ ELEVENLABS_API_KEY в ~/Movies/Instagram/.env (значение не выводить).'
+    const sent = await $.prompt.submit({ text: brief, wait: false, origin: { kind: 'sdk' } })
+    expect('drop' in sent && sent.drop !== undefined).toBe(false)
+    expect(delivered).toEqual([brief])
   })
 })
