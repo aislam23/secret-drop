@@ -1,5 +1,9 @@
 # 🔐 secret-drop
 
+> **TKRV fork — Codex adapter 0.6.0.** This fork preserves the original Claude Code mod documented below and also ships a separately maintained [Codex adapter](codex/secret-drop/README.md) as `secret-drop-codex@secret-drop-tkrv`. Codex uses a **separate native macOS masked dialog** driven by local MCP `secret-drop-local.request_secret`, not Claude's in-composer band. The agent can request one or more secrets based on non-secret project configuration, show an explanation and exact destination for human approval, then receive save/verification statuses without secret values. Safe project `.env`/`.env.*` and explicitly approved GitHub repo/environment destinations are supported. The optional Codex prompt hook requires user trust; it is **not** verified as active host DLP. The [OpenCode adapter](opencode/secret-drop/) remains experimental.
+>
+> **Codex status:** version `0.6.0`, [PR #1 merged](https://github.com/shzk/secret-drop/pull/1), independently reviewed and **accepted by the owner**. Current capability matrix, install instructions, limitations, and tests are maintained in the [Codex README](codex/secret-drop/README.md). This fork does **not** claim all Claude-only UI and prompt-interception features are available in Codex.
+
 A Claude Code mod for handing Claude API keys and passwords **without pasting them into the chat**.
 
 When Claude needs a key, a band appears right above the prompt with a masked field. You paste the key and press Enter. The mod writes it to `.env` or GitHub Actions secrets on its own. Claude only learns `OPENAI_API_KEY saved (51 chars)`, never the value.
