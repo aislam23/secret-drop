@@ -1,0 +1,14 @@
+{
+  "name": "tkrv-secret-drop-opencode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  },
+  "license": "MIT",
+  "description": "Experimental, host-E2E-unverified OpenCode secret prompt transform; not a pre-admission security guarantee",
+  "dependencies": {
+    "@opencode/plugin": "*"
+  }
+}
