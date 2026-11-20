@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/hooks/prompt_guard.py\"",
+            "statusMessage": "Checking for accidental credentials"
+          }
+        ]
+      }
+    ]
+  }
+}

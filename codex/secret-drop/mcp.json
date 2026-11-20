@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "secret-drop-local": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "-I",
+        "${PLUGIN_ROOT}/server/mcp_server.py"
+      ],
+      "cwd": "${PLUGIN_ROOT}"
+    }
+  }
+}

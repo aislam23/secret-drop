@@ -1,0 +1,28 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "secret-drop-codex",
+  "version": "0.6.0",
+  "description": "Compact native macOS masked multi-secret entry, confirmed local/GitHub targets, exact post-write local verification, per-variable save/skip status, and an optional heuristic prompt guard.",
+  "author": {
+    "name": "TKRV Engineering (adapted from Artem Islamov's Secret Drop)"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/shzk/secret-drop",
+  "keywords": [
+    "secrets",
+    "codex",
+    "prompt-guard",
+    "dotenv"
+  ],
+  "extensions": {
+    "com.openai": {
+      "hooks": "./hooks/hooks.json",
+      "interface": {
+        "displayName": "Secret Drop for Codex",
+        "shortDescription": "Compact secret dialog with verified local persistence",
+        "developerName": "TKRV Engineering",
+        "category": "Development"
+      }
+    }
+  }
+}
